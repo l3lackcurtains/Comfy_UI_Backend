@@ -9,16 +9,92 @@ from io import BytesIO
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
 import random
+import os
+from pathlib import Path
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+class ComfyUIClient:
+    def __init__(self):
+        self.client_id = str(uuid.uuid4())
+        self.ws = None
+
+    def connect_websocket(self):
+        """Connect to ComfyUI websocket"""
+        self.ws = websocket.WebSocket()
+        self.ws.connect(f"{WS_SERVER}/ws?clientId={self.client_id}")
+
+    def disconnect_websocket(self):
+        """Safely disconnect websocket"""
+        if self.ws:
+            try:
+                self.ws.close()
+            except:
+                pass
+            self.ws = None
+
+    def queue_prompt(self, prompt):
+        """Queue a prompt for processing"""
+        p = {"prompt": prompt, "client_id": self.client_id}
+        data = json.dumps(p).encode('utf-8')
+        response = http_session.post(f"{COMFYUI_SERVER}/prompt", data=data)
+        return response.json()
+
+    def wait_for_completion(self, prompt_id):
+        """Wait for prompt processing to complete"""
+        while True:
+            out = self.ws.recv()
+            if out is None:
+                continue
+
+            try:
+                message = json.loads(out)
+                if message["type"] == "executing":
+                    data = message["data"]
+                    if data["node"] is None and data["prompt_id"] == prompt_id:
+                        break  # Execution complete
+            except Exception as e:
+                logger.error(f"Error parsing websocket message: {e}")
+                continue
+
+    def get_image(self, prompt_id):
+        """Get the generated image data"""
+        response = http_session.get(f"{COMFYUI_SERVER}/history")
+        history = response.json()
+        
+        if prompt_id not in history:
+            raise ValueError("Prompt ID not found in history")
+            
+        outputs = history[prompt_id]["outputs"]
+        if not outputs:
+            raise ValueError("No outputs found for prompt")
+            
+        # Find the first node with images
+        for node_id, node_output in outputs.items():
+            if "images" in node_output:
+                image_data = node_output["images"][0]
+                
+                # Get the actual image data
+                image_response = http_session.get(f"{COMFYUI_SERVER}/view?filename={image_data['filename']}")
+                return {
+                    'content': image_response.content,
+                    'filename': image_data['filename']
+                }
+                
+        raise ValueError("No images found in output")
 
 app = Flask(__name__)
 executor = ThreadPoolExecutor(max_workers=4)  # Adjust based on your CPU cores
 
 COMFYUI_SERVER = "http://127.0.0.1:8188"
 WS_SERVER = "ws://127.0.0.1:8188"
+WORKFLOWS_DIR = "workflows"  # Directory containing workflow templates
+DEFAULT_WORKFLOW = "dit_lora"
+
+# Ensure workflows directory exists
+os.makedirs(WORKFLOWS_DIR, exist_ok=True)
 
 # Configure requests session for connection pooling
 http_session = requests.Session()
@@ -29,73 +105,24 @@ http_session.mount('http://', requests.adapters.HTTPAdapter(
     pool_block=False
 ))
 
-class ComfyUIClient:
-    def __init__(self):
-        self.client_id = str(uuid.uuid4())
-        self.websocket = None
-        self._workflow_cache = {}
-
-    def connect_websocket(self):
-        if self.websocket is None:
-            self.websocket = websocket.WebSocket()
-            self.websocket.connect(f"{WS_SERVER}/ws?clientId={self.client_id}")
-
-    def disconnect_websocket(self):
-        if self.websocket:
-            self.websocket.close()
-            self.websocket = None
-
-    def queue_prompt(self, prompt):
-        data = json.dumps({
-            "prompt": prompt,
-            "client_id": self.client_id
-        }).encode('utf-8')
-        
-        response = http_session.post(f"{COMFYUI_SERVER}/prompt", data=data)
-        response.raise_for_status()
-        return response.json()
-
-    def get_image(self, prompt_id):
-        response = http_session.get(f"{COMFYUI_SERVER}/history/{prompt_id}")
-        response.raise_for_status()
-        history = response.json()
-        
-        for node_output in history[prompt_id]['outputs'].values():
-            if 'images' in node_output:
-                image_data = node_output['images'][0]
-                image_url = f"{COMFYUI_SERVER}/view?filename={image_data['filename']}&type=output"
-                
-                image_response = http_session.get(image_url)
-                image_response.raise_for_status()
-                
-                return {
-                    'content': image_response.content,
-                    'filename': image_data['filename']
-                }
-        
-        raise Exception("No image found in output")
-
-    def wait_for_completion(self, prompt_id):
-        while True:
-            try:
-                out = self.websocket.recv()
-                if isinstance(out, str):
-                    message = json.loads(out)
-                    if isinstance(message, dict):
-                        if (message.get('type') == 'executing' and 
-                            not message.get('data', {}).get('node') and 
-                            message.get('data', {}).get('prompt_id') == prompt_id):
-                            return True
-            except websocket.WebSocketConnectionClosedException:
-                raise
-            except Exception:
-                continue
+def get_available_workflows():
+    """Get list of available workflow templates"""
+    workflows = []
+    for file in Path(WORKFLOWS_DIR).glob("*.json"):
+        workflows.append(file.stem)
+    return workflows
 
 @lru_cache(maxsize=10)
-def load_workflow_template(workflow_path):
-    """Cache the base workflow template"""
-    with open(workflow_path, 'r') as f:
-        return json.load(f)
+def load_workflow_template(workflow_name):
+    """Cache the workflow template"""
+    workflow_path = os.path.join(WORKFLOWS_DIR, f"{workflow_name}.json")
+    try:
+        with open(workflow_path, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        raise ValueError(f"Workflow template '{workflow_name}' not found")
+    except json.JSONDecodeError:
+        raise ValueError(f"Invalid JSON in workflow template '{workflow_name}'")
 
 def customize_workflow(template, prompt_text=None):
     """Customize workflow with minimal steps for fastest generation"""
@@ -113,6 +140,14 @@ def customize_workflow(template, prompt_text=None):
     
     return workflow
 
+@app.route('/workflows', methods=['GET'])
+def list_workflows():
+    """Endpoint to list available workflows"""
+    return jsonify({
+        'workflows': get_available_workflows(),
+        'default': DEFAULT_WORKFLOW
+    })
+
 @app.route('/generate', methods=['POST'])
 def generate():
     start_time = time.time()
@@ -122,12 +157,14 @@ def generate():
             return jsonify({'error': 'No prompt provided'}), 400
 
         prompt_text = data['prompt']
+        workflow_name = data.get('workflow', DEFAULT_WORKFLOW)
+
         client = ComfyUIClient()
         client.connect_websocket()
 
         try:
             # Load cached workflow template and customize
-            template = load_workflow_template('dit_loraapi.json')
+            template = load_workflow_template(workflow_name)
             workflow, used_seed = customize_workflow(template, prompt_text), template["3"]["inputs"]["seed"]
 
             # Queue and process
@@ -147,6 +184,7 @@ def generate():
             response.headers.update({
                 'X-Processing-Time': f"{processing_time:.2f}s",
                 'X-Seed': str(used_seed),
+                'X-Workflow': workflow_name,
                 'Cache-Control': 'no-store'
             })
             return response
@@ -154,6 +192,11 @@ def generate():
         finally:
             client.disconnect_websocket()
 
+    except ValueError as ve:
+        return jsonify({
+            'success': False,
+            'error': str(ve)
+        }), 400
     except Exception as e:
         processing_time = time.time() - start_time
         error_response = jsonify({
