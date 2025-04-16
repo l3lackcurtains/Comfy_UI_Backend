@@ -6,7 +6,6 @@ import uuid
 import logging
 import time
 from io import BytesIO
-import base64
 
 # Configure logging
 logging.basicConfig(
@@ -63,16 +62,22 @@ class ComfyUIClient:
         if response.status_code != 200:
             raise Exception("Failed to get history")
 
-        history = response.json()[prompt_id]
+        history = response.json()
         
         # Find the SaveImage node output
-        for node_id, node_output in history['outputs'].items():
+        for node_id, node_output in history[prompt_id]['outputs'].items():
             if 'images' in node_output:
                 image_data = node_output['images'][0]
                 image_url = f"{COMFYUI_SERVER}/view?filename={image_data['filename']}&type=output"
                 logger.info(f"Found image: {image_data['filename']}")
+                
+                # Get the image content
+                image_response = requests.get(image_url)
+                if image_response.status_code != 200:
+                    raise Exception("Failed to download image")
+                    
                 return {
-                    'content': requests.get(image_url).content,
+                    'content': image_response.content,
                     'filename': image_data['filename']
                 }
         
@@ -80,28 +85,26 @@ class ComfyUIClient:
 
     def wait_for_completion(self, prompt_id):
         """Wait for prompt execution to complete"""
-        logger.info(f"Waiting for prompt {prompt_id} to complete")
-        try:
-            while True:
+        while True:
+            try:
                 out = self.websocket.recv()
-                if isinstance(out, str):
-                    message = json.loads(out)
+                if not isinstance(out, str):
+                    continue
+                
+                message = json.loads(out)
+                if not isinstance(message, dict):
+                    continue
+
+                msg_type = message.get('type')
+                if msg_type == 'executing':
+                    data = message.get('data', {})
+                    if not data.get('node') and data.get('prompt_id') == prompt_id:
+                        return True
                     
-                    if message['type'] == 'executing':
-                        data = message['data']
-                        if data.get('node', None) is None and data.get('prompt_id') == prompt_id:
-                            logger.info("Execution completed")
-                            return True
-                        else:
-                            node_name = data.get('node', {}).get('class_type', 'unknown')
-                            logger.info(f"Processing node: {node_name}")
-                    
-                    elif message['type'] == 'progress':
-                        logger.info(f"Progress: {message.get('data', {}).get('value', 0)*100:.0f}%")
-                        
-        except Exception as e:
-            logger.error(f"Error while waiting for completion: {str(e)}")
-            raise
+            except websocket.WebSocketConnectionClosedException:
+                raise
+            except Exception:
+                continue
 
 def load_workflow(workflow_path, prompt_text=None):
     """Load and customize workflow"""
@@ -115,7 +118,13 @@ def load_workflow(workflow_path, prompt_text=None):
             workflow["6"]["inputs"]["text"] = prompt_text
             logger.info(f"Updated positive prompt: {prompt_text}")
 
-        return workflow
+        # Always generate random seed
+        import random
+        seed = random.randint(0, 0xffffffffffffffff)
+        workflow["3"]["inputs"]["seed"] = seed
+        logger.info(f"Generated random seed: {seed}")
+
+        return workflow, seed
     except Exception as e:
         logger.error(f"Failed to load workflow: {str(e)}")
         raise
@@ -138,7 +147,7 @@ def generate():
 
         try:
             # Load and customize workflow
-            workflow = load_workflow('dit_loraapi.json', prompt_text)
+            workflow, used_seed = load_workflow('dit_loraapi.json', prompt_text)
 
             # Queue the prompt
             result = client.queue_prompt(workflow)
@@ -156,7 +165,7 @@ def generate():
             # Calculate processing time
             processing_time = time.time() - start_time
             
-            # Create response with custom header
+            # Create response with custom headers
             response = send_file(
                 image_bytes,
                 mimetype='image/png',
@@ -164,6 +173,7 @@ def generate():
                 download_name=image_data['filename']
             )
             response.headers['X-Processing-Time'] = f"{processing_time:.2f}s"
+            response.headers['X-Seed'] = str(used_seed)
             return response
 
         finally:
