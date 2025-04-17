@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  comfyui:
+    build:
+      context: .
+      dockerfile: Dockerfile.comfyui
+    ports:
+      - "8188:8188"
+    volumes:
+      - ./ComfyUI/models:/app/models
+      - ./ComfyUI/output:/app/output
+      - ./ComfyUI/custom_nodes:/app/custom_nodes
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    ports:
+      - "5000:5000"
+    environment:
+      - COMFYUI_SERVER=http://comfyui:8188
+      - WS_SERVER=ws://comfyui:8188
+    depends_on:
+      - comfyui
+    volumes:
+      - ./workflows:/app/workflows
+
+volumes:
+  comfyui_outputs:

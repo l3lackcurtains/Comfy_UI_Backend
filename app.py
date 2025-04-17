@@ -88,8 +88,8 @@ class ComfyUIClient:
 app = Flask(__name__)
 executor = ThreadPoolExecutor(max_workers=4)  # Adjust based on your CPU cores
 
-COMFYUI_SERVER = "http://127.0.0.1:8188"
-WS_SERVER = "ws://127.0.0.1:8188"
+COMFYUI_SERVER = os.getenv('COMFYUI_SERVER', 'http://127.0.0.1:8188')
+WS_SERVER = os.getenv('WS_SERVER', 'ws://127.0.0.1:8188')
 WORKFLOWS_DIR = "workflows"  # Directory containing workflow templates
 DEFAULT_WORKFLOW = "dit_lora"
 
