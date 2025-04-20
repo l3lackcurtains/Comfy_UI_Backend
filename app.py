@@ -222,5 +222,5 @@ def health_check():
         }), 503
 
 if __name__ == '__main__':
-    logger.info("Starting Flask server on port 5000")
-    app.run(host='0.0.0.0', port=5000, threaded=True)
+    logger.info("Starting Flask server on port 8787")
+    app.run(host='0.0.0.0', port=8787, threaded=True)
