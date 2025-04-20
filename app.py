@@ -128,17 +128,29 @@ def customize_workflow(template, prompt_text=None):
     """Customize workflow with minimal steps for fastest generation"""
     workflow = template.copy()
     
+    # Find KSampler node ID
+    ksampler_node = None
+    for node_id, node in workflow.items():
+        if node.get("class_type") == "KSampler":
+            ksampler_node = node_id
+            break
+    
+    if not ksampler_node:
+        raise ValueError("No KSampler node found in workflow")
+
+    # Set minimal sampling parameters that work for both Flux and LoRA
+    workflow[ksampler_node]["inputs"]["seed"] = random.randint(0, 0xffffffffffffffff)
+    workflow[ksampler_node]["inputs"]["steps"] = 20
+    
+    # Update prompt if provided
     if prompt_text:
-        workflow["6"]["inputs"]["text"] = prompt_text
+        for node_id, node in workflow.items():
+            if (node.get("class_type") == "CLIPTextEncode" and 
+                node.get("_meta", {}).get("title", "").lower().startswith("clip text encode (positive")):
+                workflow[node_id]["inputs"]["text"] = prompt_text
+                break
     
-    # Set ultra-fast sampling parameters
-    workflow["3"]["inputs"]["seed"] = random.randint(0, 0xffffffffffffffff)
-    workflow["3"]["inputs"]["steps"] = 10  # Minimum recommended steps
-    workflow["3"]["inputs"]["sampler_name"] = "euler_ancestral"
-    workflow["3"]["inputs"]["scheduler"] = "karras"
-    workflow["3"]["inputs"]["cfg"] = 5.0  # Minimum recommended CFG
-    
-    return workflow
+    return workflow, workflow[ksampler_node]["inputs"]["seed"]
 
 @app.route('/workflows', methods=['GET'])
 def list_workflows():
@@ -165,7 +177,7 @@ def generate():
         try:
             # Load cached workflow template and customize
             template = load_workflow_template(workflow_name)
-            workflow, used_seed = customize_workflow(template, prompt_text), template["3"]["inputs"]["seed"]
+            workflow, used_seed = customize_workflow(template, prompt_text)  # Fixed tuple unpacking
 
             # Queue and process
             result = client.queue_prompt(workflow)
