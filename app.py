@@ -70,7 +70,7 @@ def load_workflow_template(workflow_name):
     except (FileNotFoundError, json.JSONDecodeError) as e:
         raise ValueError(f"Error loading workflow '{workflow_name}': {str(e)}")
 
-def customize_workflow(template, prompt_text=None):
+def customize_workflow(template, prompt_text=None, width=768, height=768):
     workflow = template.copy()
     
     # Find KSampler node
@@ -83,6 +83,13 @@ def customize_workflow(template, prompt_text=None):
     seed = random.randint(0, 0xffffffffffffffff)
     workflow[ksampler_node]["inputs"]["seed"] = seed
     workflow[ksampler_node]["inputs"]["steps"] = 20
+    
+    # Update dimensions in all relevant nodes
+    for node in workflow.values():
+        if "width" in node.get("inputs", {}):
+            node["inputs"]["width"] = width
+        if "height" in node.get("inputs", {}):
+            node["inputs"]["height"] = height
     
     # Update prompt
     if prompt_text:
@@ -104,12 +111,18 @@ def generate():
         if not data or 'prompt' not in data:
             return jsonify({'error': 'No prompt provided'}), 400
 
+        # Get dimensions with defaults
+        width = data.get('width', 768)
+        height = data.get('height', 768)
+
         client = ComfyUIClient()
         client.connect_websocket()
         try:
             workflow, seed = customize_workflow(
                 load_workflow_template(data.get('workflow', DEFAULT_WORKFLOW)), 
-                data['prompt']
+                data['prompt'],
+                width,
+                height
             )
             
             result = client.queue_prompt(workflow)
@@ -128,6 +141,8 @@ def generate():
                 'X-Processing-Time': f"{processing_time:.2f}s",
                 'X-Seed': str(seed),
                 'X-Workflow': data.get('workflow', DEFAULT_WORKFLOW),
+                'X-Width': str(width),
+                'X-Height': str(height),
                 'Cache-Control': 'no-store'
             })
             return response
