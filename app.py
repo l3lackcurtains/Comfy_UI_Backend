@@ -9,7 +9,9 @@ import json
 import uuid
 import websocket
 import requests
-from flask import Flask, jsonify, request, send_file
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
 
 # Basic configuration
 COMFYUI_SERVER = os.getenv('COMFYUI_SERVER', 'http://127.0.0.1:8188')
@@ -22,6 +24,17 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 http_session = requests.Session()
 http_session.mount('http://', requests.adapters.HTTPAdapter(pool_maxsize=100, max_retries=3))
+
+# Pydantic models for request validation
+class GenerateRequest(BaseModel):
+    prompt: str
+    workflow: str = DEFAULT_WORKFLOW
+    width: int = Field(default=768, ge=64, le=2048)
+    height: int = Field(default=768, ge=64, le=2048)
+
+class HealthResponse(BaseModel):
+    status: str
+    comfyui_connected: bool
 
 class ComfyUIClient:
     def __init__(self):
@@ -63,117 +76,109 @@ class ComfyUIClient:
         raise ValueError("No images found in output")
 
 @lru_cache(maxsize=10)
-def load_workflow_template(workflow_name):
+def load_workflow_template(workflow_name: str):
     try:
         with open(os.path.join(WORKFLOWS_DIR, f"{workflow_name}.json"), 'r') as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError) as e:
         raise ValueError(f"Error loading workflow '{workflow_name}': {str(e)}")
 
-def customize_workflow(template, prompt_text=None, width=768, height=768):
+def customize_workflow(template: dict, prompt_text: str, width: int = 768, height: int = 768):
     workflow = template.copy()
     
-    # Find KSampler node
     ksampler_node = next((node_id for node_id, node in workflow.items() 
                          if node.get("class_type") == "KSampler"), None)
     if not ksampler_node:
         raise ValueError("No KSampler node found")
 
-    # Set minimal parameters
     seed = random.randint(0, 0xffffffffffffffff)
     workflow[ksampler_node]["inputs"]["seed"] = seed
     workflow[ksampler_node]["inputs"]["steps"] = 20
     
-    # Update dimensions in all relevant nodes
     for node in workflow.values():
         if "width" in node.get("inputs", {}):
             node["inputs"]["width"] = width
         if "height" in node.get("inputs", {}):
             node["inputs"]["height"] = height
     
-    # Update prompt
-    if prompt_text:
-        for node_id, node in workflow.items():
-            if (node.get("class_type") == "CLIPTextEncode" and 
-                node.get("_meta", {}).get("title", "").lower().startswith("clip text encode (positive")):
-                workflow[node_id]["inputs"]["text"] = prompt_text
-                break
+    for node_id, node in workflow.items():
+        if (node.get("class_type") == "CLIPTextEncode" and 
+            node.get("_meta", {}).get("title", "").lower().startswith("clip text encode (positive")):
+            workflow[node_id]["inputs"]["text"] = prompt_text
+            break
     
     return workflow, seed
 
-app = Flask(__name__)
+app = FastAPI(title="Image Generation API", version="1.0.0")
 
-@app.route('/generate', methods=['POST'])
-def generate():
+@app.post("/generate")
+async def generate(request: GenerateRequest):
     start_time = time.time()
     try:
-        data = request.get_json()
-        if not data or 'prompt' not in data:
-            return jsonify({'error': 'No prompt provided'}), 400
-
-        # Get dimensions with defaults
-        width = data.get('width', 768)
-        height = data.get('height', 768)
-
         client = ComfyUIClient()
         client.connect_websocket()
         try:
             workflow, seed = customize_workflow(
-                load_workflow_template(data.get('workflow', DEFAULT_WORKFLOW)), 
-                data['prompt'],
-                width,
-                height
+                load_workflow_template(request.workflow), 
+                request.prompt,
+                request.width,
+                request.height
             )
             
             result = client.queue_prompt(workflow)
             client.wait_for_completion(result['prompt_id'])
             image_data = client.get_image(result['prompt_id'])
             
-            response = send_file(
-                BytesIO(image_data['content']),
-                mimetype='image/png',
-                as_attachment=True,
-                download_name=image_data['filename']
-            )
-            
-            processing_time = time.time() - start_time
-            response.headers.update({
-                'X-Processing-Time': f"{processing_time:.2f}s",
+            headers = {
+                'X-Processing-Time': f"{time.time() - start_time:.2f}s",
                 'X-Seed': str(seed),
-                'X-Workflow': data.get('workflow', DEFAULT_WORKFLOW),
-                'X-Width': str(width),
-                'X-Height': str(height),
+                'X-Workflow': request.workflow,
+                'X-Width': str(request.width),
+                'X-Height': str(request.height),
                 'Cache-Control': 'no-store'
-            })
-            return response
+            }
+            
+            return StreamingResponse(
+                BytesIO(image_data['content']),
+                media_type='image/png',
+                headers=headers
+            )
 
         finally:
             client.disconnect_websocket()
 
     except Exception as e:
         processing_time = time.time() - start_time
-        return jsonify({
-            'success': False,
-            'error': str(e),
-            'processing_time': f"{processing_time:.2f}s"
-        }), 500
+        raise HTTPException(
+            status_code=500,
+            detail={
+                'success': False,
+                'error': str(e),
+                'processing_time': f"{processing_time:.2f}s"
+            }
+        )
 
-@app.route('/workflows', methods=['GET'])
-def list_workflows():
-    return jsonify({
+@app.get("/workflows")
+async def list_workflows():
+    return {
         'workflows': [f.stem for f in Path(WORKFLOWS_DIR).glob("*.json")],
         'default': DEFAULT_WORKFLOW
-    })
+    }
 
-@app.route('/health', methods=['GET'])
-def health_check():
+@app.get("/health", response_model=HealthResponse)
+async def health_check():
     try:
         status = http_session.get(f"{COMFYUI_SERVER}/history").status_code == 200
-        return jsonify({'status': 'healthy', 'comfyui_connected': status}), 200 if status else 503
+        return HealthResponse(
+            status='healthy' if status else 'unhealthy',
+            comfyui_connected=status
+        )
     except:
-        return jsonify({'status': 'unhealthy', 'comfyui_connected': False}), 503
+        return HealthResponse(status='unhealthy', comfyui_connected=False)
 
 if __name__ == '__main__':
+    import uvicorn
+    
     os.makedirs(WORKFLOWS_DIR, exist_ok=True)
-    logger.info("Starting Flask server on port 8787")
-    app.run(host='0.0.0.0', port=8787)
+    logger.info("Starting FastAPI server on port 8787")
+    uvicorn.run(app, host="0.0.0.0", port=8787)
