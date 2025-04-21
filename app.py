@@ -10,14 +10,14 @@ import uuid
 import websocket
 import requests
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 # Basic configuration
 COMFYUI_SERVER = os.getenv('COMFYUI_SERVER', 'http://127.0.0.1:8188')
 WS_SERVER = os.getenv('WS_SERVER', 'ws://127.0.0.1:8188')
 WORKFLOWS_DIR = "workflows"
-DEFAULT_WORKFLOW = "dit_lora"
+DEFAULT_WORKFLOW = "lora"
 
 # Configure logging and HTTP session
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

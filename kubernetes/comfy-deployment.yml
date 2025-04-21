@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: comfy-image-generation-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: comfy-image-generation
+  template:
+    metadata:
+      labels:
+        app: comfy-image-generation
+    spec:
+      containers:
+        - name: comfy-image-generation
+          image: gcr.io/citric-lead-450721-v2/comfy-image-generation:1.0.0
+          ports:
+            - containerPort: 8787
+          env:
+            - name: COMFYUI_SERVER
+              value: "http://localhost:8188"
+            - name: WS_SERVER
+              value: "ws://localhost:8188"
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+              cpu: "8"
+              memory: "64Gi"
+            requests:
+              nvidia.com/gpu: 1
+              cpu: "4"
+              memory: "48Gi"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: comfy-image-generation-service
+spec:
+  selector:
+    app: comfy-image-generation
+  ports:
+    - port: 8787
+      targetPort: 8787
+  type: NodePort
