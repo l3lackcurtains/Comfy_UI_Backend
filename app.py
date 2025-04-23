@@ -95,17 +95,35 @@ def customize_workflow(template: dict, prompt_text: str, width: int = 768, heigh
     workflow[ksampler_node]["inputs"]["seed"] = seed
     workflow[ksampler_node]["inputs"]["steps"] = 20
     
+    # Update dimensions
     for node in workflow.values():
         if "width" in node.get("inputs", {}):
             node["inputs"]["width"] = width
         if "height" in node.get("inputs", {}):
             node["inputs"]["height"] = height
     
+    # Handle prompts more robustly
+    prompt_set = False
     for node_id, node in workflow.items():
-        if (node.get("class_type") == "CLIPTextEncode" and 
-            node.get("_meta", {}).get("title", "").lower().startswith("clip text encode (positive")):
-            workflow[node_id]["inputs"]["text"] = prompt_text
-            break
+        if node.get("class_type") == "CLIPTextEncode":
+            # Check if this is a positive prompt node
+            if ("positive" in str(node.get("_meta", {}).get("title", "")).lower() or 
+                node.get("inputs", {}).get("text", "").strip()):  # Assume non-empty text field is positive prompt
+                workflow[node_id]["inputs"]["text"] = prompt_text
+                prompt_set = True
+                logging.info(f"Set positive prompt in node {node_id}: {prompt_text}")
+    
+    if not prompt_set:
+        # Fallback: try to find any CLIPTextEncode node
+        for node_id, node in workflow.items():
+            if node.get("class_type") == "CLIPTextEncode":
+                workflow[node_id]["inputs"]["text"] = prompt_text
+                logging.info(f"Set prompt in fallback node {node_id}: {prompt_text}")
+                prompt_set = True
+                break
+    
+    if not prompt_set:
+        raise ValueError("No suitable CLIP text encode node found in workflow")
     
     return workflow, seed
 
