@@ -83,17 +83,111 @@ def load_workflow_template(workflow_name: str):
     except (FileNotFoundError, json.JSONDecodeError) as e:
         raise ValueError(f"Error loading workflow '{workflow_name}': {str(e)}")
 
-def customize_workflow(template: dict, prompt_text: str, width: int = 768, height: int = 768):
+class ModelConfig:
+    def __init__(self, steps=20, cfg=7.0, sampler="euler_a", scheduler="normal", denoise=1.0,
+                 lora_strength_model=1.0, lora_strength_clip=1.0, custom_params=None):
+        self.steps = steps
+        self.cfg = cfg
+        self.sampler = sampler
+        self.scheduler = scheduler
+        self.denoise = denoise
+        self.lora_strength_model = lora_strength_model
+        self.lora_strength_clip = lora_strength_clip
+        self.custom_params = custom_params or {}
+
+MODEL_CONFIGS = {
+    "lora": ModelConfig(
+        steps=30,
+        cfg=7.0,
+        sampler="dpmpp_2m",
+        scheduler="karras",
+        lora_strength_model=0.75,
+        lora_strength_clip=1.0
+    ),
+    
+    "lora_1": ModelConfig(
+        steps=30,
+        cfg=7.0,
+        sampler="dpmpp_2m",
+        scheduler="karras",
+        lora_strength_model=0.75,
+        lora_strength_clip=1.0
+    ),
+    
+    "flux_dev": ModelConfig(
+        steps=20,
+        cfg=1.0,
+        sampler="euler",
+        scheduler="simple",
+        denoise=1.0,
+        custom_params={
+            "width": 768,
+            "height": 768
+        }
+    ),
+    
+    "flux_schnell": ModelConfig(
+        steps=4,
+        cfg=1.0,
+        sampler="euler",
+        scheduler="simple",
+        denoise=1.0,
+        custom_params={
+            "width": 768,
+            "height": 768
+        }
+    )
+}
+
+def get_model_config(workflow_name: str) -> ModelConfig:
+    """Get the configuration for a specific model/workflow."""
+    base_name = workflow_name.split('.')[0].lower()
+    return MODEL_CONFIGS.get(base_name, MODEL_CONFIGS["lora"])  # Default to lora config
+
+def customize_workflow(template: dict, prompt_text: str, width: int = 768, height: int = 768, workflow_name: str = "lora"):
     workflow = template.copy()
     
+    # Get model-specific configuration
+    config = get_model_config(workflow_name)
+    logging.info(f"Using configuration for model: {workflow_name}")
+    
+    # Find key nodes
     ksampler_node = next((node_id for node_id, node in workflow.items() 
                          if node.get("class_type") == "KSampler"), None)
+    lora_loader_node = next((node_id for node_id, node in workflow.items() 
+                           if node.get("class_type") in ["LoraLoader", "DiffControlNetLoader"]), None)
+    
     if not ksampler_node:
         raise ValueError("No KSampler node found")
 
+    # Set sampling parameters based on model config
     seed = random.randint(0, 0xffffffffffffffff)
-    workflow[ksampler_node]["inputs"]["seed"] = seed
-    workflow[ksampler_node]["inputs"]["steps"] = 20
+    workflow[ksampler_node]["inputs"].update({
+        "seed": seed,
+        "steps": config.steps,
+        "cfg": config.cfg,
+        "sampler_name": config.sampler,
+        "scheduler": config.scheduler,
+        "denoise": config.denoise,
+    })
+    
+    # Configure LoRA strength if present
+    if lora_loader_node and workflow_name.startswith("lora"):
+        workflow[lora_loader_node]["inputs"].update({
+            "strength_model": config.lora_strength_model,
+            "strength_clip": config.lora_strength_clip,
+        })
+        logging.info(f"Configured LoRA node {lora_loader_node} with strengths: "
+                    f"model={config.lora_strength_model}, clip={config.lora_strength_clip}")
+    
+    # Apply model-specific custom parameters
+    if config.custom_params:
+        for node in workflow.values():
+            if "inputs" in node:
+                for param_name, param_value in config.custom_params.items():
+                    if param_name in node["inputs"]:
+                        node["inputs"][param_name] = param_value
+                        logging.info(f"Set custom parameter {param_name}={param_value} for node {node.get('class_type')}")
     
     # Update dimensions
     for node in workflow.values():
@@ -102,30 +196,83 @@ def customize_workflow(template: dict, prompt_text: str, width: int = 768, heigh
         if "height" in node.get("inputs", {}):
             node["inputs"]["height"] = height
     
-    # Handle prompts more robustly
+    # Handle prompts
     prompt_set = False
     for node_id, node in workflow.items():
         if node.get("class_type") == "CLIPTextEncode":
-            # Check if this is a positive prompt node
             if ("positive" in str(node.get("_meta", {}).get("title", "")).lower() or 
-                node.get("inputs", {}).get("text", "").strip()):  # Assume non-empty text field is positive prompt
+                not "negative" in str(node.get("_meta", {}).get("title", "")).lower()):
                 workflow[node_id]["inputs"]["text"] = prompt_text
                 prompt_set = True
-                logging.info(f"Set positive prompt in node {node_id}: {prompt_text}")
-    
-    if not prompt_set:
-        # Fallback: try to find any CLIPTextEncode node
-        for node_id, node in workflow.items():
-            if node.get("class_type") == "CLIPTextEncode":
-                workflow[node_id]["inputs"]["text"] = prompt_text
-                logging.info(f"Set prompt in fallback node {node_id}: {prompt_text}")
-                prompt_set = True
-                break
+                logging.info(f"Set positive prompt in node {node_id}")
+                
+                # Handle negative prompt node if present
+                negative_node = next((n_id for n_id, n in workflow.items() 
+                                   if n.get("class_type") == "CLIPTextEncode" and 
+                                   "negative" in str(n.get("_meta", {}).get("title", "")).lower()), None)
+                if negative_node:
+                    workflow[negative_node]["inputs"]["text"] = ""
+                    logging.info(f"Set empty negative prompt in node {negative_node}")
     
     if not prompt_set:
         raise ValueError("No suitable CLIP text encode node found in workflow")
     
+    # Log configuration summary
+    logging.info(f"Workflow configuration summary for {workflow_name}:")
+    logging.info(f"- Seed: {seed}")
+    logging.info(f"- Dimensions: {width}x{height}")
+    logging.info(f"- Sampling settings: steps={config.steps}, cfg={config.cfg}, "
+                f"sampler={config.sampler}, scheduler={config.scheduler}")
+    if config.custom_params:
+        logging.info(f"- Custom parameters: {config.custom_params}")
+    
     return workflow, seed
+
+def validate_workflow(workflow: dict, workflow_name: str) -> bool:
+    """Validates that a workflow has all necessary components for the specified model."""
+    required_nodes = {
+        "lora": {
+            "LoraLoader": False,
+            "KSampler": False,
+            "CLIPTextEncode": False,
+            "VAEDecode": False,
+            "CheckpointLoaderSimple": False,
+        },
+        "lora_1": {
+            "LoraLoader": False,
+            "KSampler": False,
+            "CLIPTextEncode": False,
+            "VAEDecode": False,
+            "CheckpointLoaderSimple": False,
+        },
+        "flux_dev": {
+            "KSampler": False,
+            "CLIPTextEncode": False,
+            "VAEDecode": False,
+            "CheckpointLoaderSimple": False,
+        },
+        "flux_schnell": {
+            "KSampler": False,
+            "CLIPTextEncode": False,
+            "VAEDecode": False,
+            "CheckpointLoaderSimple": False,
+        }
+    }
+    
+    # Use lora requirements as default
+    model_type = next((k for k in required_nodes.keys() if workflow_name.startswith(k)), "lora")
+    required = required_nodes[model_type]
+    
+    for node in workflow.values():
+        node_type = node.get("class_type")
+        if node_type in required:
+            required[node_type] = True
+    
+    missing_nodes = [node for node, present in required.items() if not present]
+    if missing_nodes:
+        raise ValueError(f"Workflow {workflow_name} is missing required nodes: {', '.join(missing_nodes)}")
+    
+    return True
 
 app = FastAPI(title="Image Generation API", version="1.0.0")
 
@@ -133,46 +280,59 @@ app = FastAPI(title="Image Generation API", version="1.0.0")
 async def generate(request: GenerateRequest):
     start_time = time.time()
     try:
+        logging.info(f"Received generation request for workflow {request.workflow} with prompt: {request.prompt}")
         client = ComfyUIClient()
         client.connect_websocket()
         try:
+            workflow_template = load_workflow_template(request.workflow)
+            logging.info(f"Loaded workflow template: {request.workflow}")
+            
+            # Validate workflow before proceeding
+            validate_workflow(workflow_template, request.workflow)
+            
             workflow, seed = customize_workflow(
-                load_workflow_template(request.workflow), 
+                workflow_template, 
                 request.prompt,
                 request.width,
-                request.height
+                request.height,
+                request.workflow
             )
             
+            logging.info(f"Customized workflow with prompt. Sending to ComfyUI...")
             result = client.queue_prompt(workflow)
-            client.wait_for_completion(result['prompt_id'])
-            image_data = client.get_image(result['prompt_id'])
             
-            headers = {
-                'X-Processing-Time': f"{time.time() - start_time:.2f}s",
-                'X-Seed': str(seed),
-                'X-Workflow': request.workflow,
-                'X-Width': str(request.width),
-                'X-Height': str(request.height),
-                'Cache-Control': 'no-store'
-            }
+            if not result or 'prompt_id' not in result:
+                raise ValueError("Failed to get valid prompt ID from server")
+                
+            prompt_id = result['prompt_id']
+            logging.info(f"Prompt queued with ID: {prompt_id}")
+            
+            client.wait_for_completion(prompt_id)
+            image_data = client.get_image(prompt_id)
             
             return StreamingResponse(
                 BytesIO(image_data['content']),
                 media_type='image/png',
-                headers=headers
+                headers={
+                    'X-Processing-Time': f"{time.time() - start_time:.2f}s",
+                    'X-Seed': str(seed),
+                    'X-Workflow': request.workflow,
+                    'X-Model-Config': request.workflow,
+                    'X-Width': str(request.width),
+                    'X-Height': str(request.height),
+                    'Cache-Control': 'no-store'
+                }
             )
-
         finally:
             client.disconnect_websocket()
-
     except Exception as e:
-        processing_time = time.time() - start_time
+        logging.error(f"Generation failed: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail={
                 'success': False,
                 'error': str(e),
-                'processing_time': f"{processing_time:.2f}s"
+                'processing_time': f"{time.time() - start_time:.2f}s"
             }
         )
 
