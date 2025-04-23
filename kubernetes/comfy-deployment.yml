@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: comfy-image-generation
-          image: gcr.io/citric-lead-450721-v2/comfy-image-generation:1.0.0
+          image: gcr.io/citric-lead-450721-v2/comfy-image-generation:1.0.1
           ports:
             - containerPort: 8787
           env:

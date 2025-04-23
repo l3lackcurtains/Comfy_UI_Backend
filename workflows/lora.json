@@ -1,7 +1,7 @@
 {
   "3": {
     "inputs": {
-      "seed": 806955505434698,
+      "seed": 82601036921588,
       "steps": 30,
       "cfg": 7,
       "sampler_name": "dpmpp_2m",
@@ -106,7 +106,7 @@
   },
   "11": {
     "inputs": {
-      "lora_name": "blindbox_v1_mix.safetensors",
+      "lora_name": "dit_lora.safetensors",
       "strength_model": 0.75,
       "strength_clip": 1,
       "model": [
