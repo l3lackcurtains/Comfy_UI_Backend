@@ -13,19 +13,16 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-# Basic configuration
 COMFYUI_SERVER = os.getenv('COMFYUI_SERVER', 'http://127.0.0.1:8188')
 WS_SERVER = os.getenv('WS_SERVER', 'ws://127.0.0.1:8188')
 WORKFLOWS_DIR = "workflows"
 DEFAULT_WORKFLOW = "lora"
 
-# Configure logging and HTTP session
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 http_session = requests.Session()
 http_session.mount('http://', requests.adapters.HTTPAdapter(pool_maxsize=100, max_retries=3))
 
-# Pydantic models for request validation
 class GenerateRequest(BaseModel):
     prompt: str
     workflow: str = DEFAULT_WORKFLOW
@@ -84,8 +81,9 @@ def load_workflow_template(workflow_name: str):
         raise ValueError(f"Error loading workflow '{workflow_name}': {str(e)}")
 
 class ModelConfig:
-    def __init__(self, steps=20, cfg=7.0, sampler="euler_a", scheduler="normal", denoise=1.0,
-                 lora_strength_model=1.0, lora_strength_clip=1.0, custom_params=None):
+    def __init__(self, steps, cfg, sampler, scheduler, denoise=1.0, 
+                 lora_strength_model=0.75, lora_strength_clip=1.0,
+                 custom_params=None):
         self.steps = steps
         self.cfg = cfg
         self.sampler = sampler
@@ -93,65 +91,50 @@ class ModelConfig:
         self.denoise = denoise
         self.lora_strength_model = lora_strength_model
         self.lora_strength_clip = lora_strength_clip
-        self.custom_params = custom_params or {}
+        self.custom_params = custom_params if custom_params else {}
 
 MODEL_CONFIGS = {
     "lora": ModelConfig(
-        steps=30,
-        cfg=7.0,
-        sampler="dpmpp_2m",
-        scheduler="karras",
-        lora_strength_model=0.75,
+        steps=80,
+        cfg=8.5,
+        sampler="euler_ancestral",
+        scheduler="simple",
+        lora_strength_model=0.85,
         lora_strength_clip=1.0
     ),
-    
     "lora_1": ModelConfig(
-        steps=30,
-        cfg=7.0,
-        sampler="dpmpp_2m",
-        scheduler="karras",
-        lora_strength_model=0.75,
+        steps=80,
+        cfg=8.5,
+        sampler="euler_ancestral",
+        scheduler="simple",
+        lora_strength_model=0.85,
         lora_strength_clip=1.0
     ),
-    
     "flux_dev": ModelConfig(
         steps=20,
-        cfg=1.0,
-        sampler="euler",
+        cfg=1,
+        sampler="euler_ancestral",
         scheduler="simple",
-        denoise=1.0,
-        custom_params={
-            "width": 768,
-            "height": 768
-        }
+        custom_params={}
     ),
-    
     "flux_schnell": ModelConfig(
         steps=4,
-        cfg=1.0,
-        sampler="euler",
+        cfg=1,
+        sampler="euler_ancestral",
         scheduler="simple",
-        denoise=1.0,
-        custom_params={
-            "width": 768,
-            "height": 768
-        }
+        custom_params={}
     )
 }
 
 def get_model_config(workflow_name: str) -> ModelConfig:
-    """Get the configuration for a specific model/workflow."""
     base_name = workflow_name.split('.')[0].lower()
-    return MODEL_CONFIGS.get(base_name, MODEL_CONFIGS["lora"])  # Default to lora config
+    return MODEL_CONFIGS.get(base_name, MODEL_CONFIGS["lora"])
 
 def customize_workflow(template: dict, prompt_text: str, width: int = 768, height: int = 768, workflow_name: str = "lora"):
     workflow = template.copy()
-    
-    # Get model-specific configuration
     config = get_model_config(workflow_name)
     logging.info(f"Using configuration for model: {workflow_name}")
     
-    # Find key nodes
     ksampler_node = next((node_id for node_id, node in workflow.items() 
                          if node.get("class_type") == "KSampler"), None)
     lora_loader_node = next((node_id for node_id, node in workflow.items() 
@@ -160,7 +143,6 @@ def customize_workflow(template: dict, prompt_text: str, width: int = 768, heigh
     if not ksampler_node:
         raise ValueError("No KSampler node found")
 
-    # Set sampling parameters based on model config
     seed = random.randint(0, 0xffffffffffffffff)
     workflow[ksampler_node]["inputs"].update({
         "seed": seed,
@@ -171,7 +153,6 @@ def customize_workflow(template: dict, prompt_text: str, width: int = 768, heigh
         "denoise": config.denoise,
     })
     
-    # Configure LoRA strength if present
     if lora_loader_node and workflow_name.startswith("lora"):
         workflow[lora_loader_node]["inputs"].update({
             "strength_model": config.lora_strength_model,
@@ -180,7 +161,6 @@ def customize_workflow(template: dict, prompt_text: str, width: int = 768, heigh
         logging.info(f"Configured LoRA node {lora_loader_node} with strengths: "
                     f"model={config.lora_strength_model}, clip={config.lora_strength_clip}")
     
-    # Apply model-specific custom parameters
     if config.custom_params:
         for node in workflow.values():
             if "inputs" in node:
@@ -189,14 +169,12 @@ def customize_workflow(template: dict, prompt_text: str, width: int = 768, heigh
                         node["inputs"][param_name] = param_value
                         logging.info(f"Set custom parameter {param_name}={param_value} for node {node.get('class_type')}")
     
-    # Update dimensions
     for node in workflow.values():
         if "width" in node.get("inputs", {}):
             node["inputs"]["width"] = width
         if "height" in node.get("inputs", {}):
             node["inputs"]["height"] = height
     
-    # Handle prompts
     prompt_set = False
     for node_id, node in workflow.items():
         if node.get("class_type") == "CLIPTextEncode":
@@ -206,7 +184,6 @@ def customize_workflow(template: dict, prompt_text: str, width: int = 768, heigh
                 prompt_set = True
                 logging.info(f"Set positive prompt in node {node_id}")
                 
-                # Handle negative prompt node if present
                 negative_node = next((n_id for n_id, n in workflow.items() 
                                    if n.get("class_type") == "CLIPTextEncode" and 
                                    "negative" in str(n.get("_meta", {}).get("title", "")).lower()), None)
@@ -217,7 +194,6 @@ def customize_workflow(template: dict, prompt_text: str, width: int = 768, heigh
     if not prompt_set:
         raise ValueError("No suitable CLIP text encode node found in workflow")
     
-    # Log configuration summary
     logging.info(f"Workflow configuration summary for {workflow_name}:")
     logging.info(f"- Seed: {seed}")
     logging.info(f"- Dimensions: {width}x{height}")
@@ -229,46 +205,19 @@ def customize_workflow(template: dict, prompt_text: str, width: int = 768, heigh
     return workflow, seed
 
 def validate_workflow(workflow: dict, workflow_name: str) -> bool:
-    """Validates that a workflow has all necessary components for the specified model."""
     required_nodes = {
-        "lora": {
-            "LoraLoader": False,
-            "KSampler": False,
-            "CLIPTextEncode": False,
-            "VAEDecode": False,
-            "CheckpointLoaderSimple": False,
-        },
-        "lora_1": {
-            "LoraLoader": False,
-            "KSampler": False,
-            "CLIPTextEncode": False,
-            "VAEDecode": False,
-            "CheckpointLoaderSimple": False,
-        },
-        "flux_dev": {
-            "KSampler": False,
-            "CLIPTextEncode": False,
-            "VAEDecode": False,
-            "CheckpointLoaderSimple": False,
-        },
-        "flux_schnell": {
-            "KSampler": False,
-            "CLIPTextEncode": False,
-            "VAEDecode": False,
-            "CheckpointLoaderSimple": False,
-        }
+        "KSampler": False,
+        "CLIPTextEncode": False,
+        "VAEDecode": False,
+        "CheckpointLoaderSimple": False
     }
-    
-    # Use lora requirements as default
-    model_type = next((k for k in required_nodes.keys() if workflow_name.startswith(k)), "lora")
-    required = required_nodes[model_type]
     
     for node in workflow.values():
         node_type = node.get("class_type")
-        if node_type in required:
-            required[node_type] = True
+        if node_type in required_nodes:
+            required_nodes[node_type] = True
     
-    missing_nodes = [node for node, present in required.items() if not present]
+    missing_nodes = [node for node, present in required_nodes.items() if not present]
     if missing_nodes:
         raise ValueError(f"Workflow {workflow_name} is missing required nodes: {', '.join(missing_nodes)}")
     
@@ -287,7 +236,6 @@ async def generate(request: GenerateRequest):
             workflow_template = load_workflow_template(request.workflow)
             logging.info(f"Loaded workflow template: {request.workflow}")
             
-            # Validate workflow before proceeding
             validate_workflow(workflow_template, request.workflow)
             
             workflow, seed = customize_workflow(
