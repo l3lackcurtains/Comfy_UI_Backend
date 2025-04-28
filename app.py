@@ -90,16 +90,10 @@ class ModelConfig:
 
 MODEL_CONFIGS = {
     "lora": ModelConfig(
-        steps=60,
+        steps=80,
         cfg=7.0,
         sampler="dpmpp_2m",
         scheduler="karras"
-    ),
-    "lora_1": ModelConfig(
-        steps=80,
-        cfg=8.5,
-        sampler="euler_ancestral",
-        scheduler="simple"
     ),
     "flux_dev": ModelConfig(
         steps=20,
@@ -108,7 +102,7 @@ MODEL_CONFIGS = {
         scheduler="simple"
     ),
     "flux_schnell": ModelConfig(
-        steps=4,
+        steps=12,
         cfg=1,
         sampler="euler_ancestral",
         scheduler="simple"
@@ -119,23 +113,24 @@ def get_model_config(workflow_name: str) -> ModelConfig:
     base_name = workflow_name.split('.')[0].lower()
     return MODEL_CONFIGS.get(base_name, MODEL_CONFIGS["lora"])
 
-def customize_workflow(template: dict, prompt_text: str, width: int = 768, height: int = 768, workflow_name: str = "lora", use_fixed_seed: bool = False, fixed_seed_value: int = 806955505434698):
+def customize_workflow(template: dict, prompt_text: str, width: int = 768, height: int = 768, workflow_name: str = "lora"):
     workflow = template.copy()
     config = get_model_config(workflow_name)
     logging.info(f"Using configuration for model: {workflow_name}")
 
+    # Find KSampler node
     ksampler_node_id = next((node_id for node_id, node in workflow.items()
                              if node.get("class_type") == "KSampler"), None)
-    lora_loader_node_id = next((node_id for node_id, node in workflow.items()
-                                if node.get("class_type") in ["LoraLoader", "DiffControlNetLoader"]), None)
 
     if not ksampler_node_id:
         raise ValueError("No KSampler node found")
 
     ksampler_node = workflow[ksampler_node_id]
 
-    # Use fixed seed if requested, otherwise random
-    seed = fixed_seed_value if use_fixed_seed else random.randint(0, 0xffffffffffffffff)
+    # Generate random seed
+    seed = random.randint(0, 0xffffffffffffffff)
+    
+    # Update KSampler parameters
     ksampler_node["inputs"].update({
         "seed": seed,
         "steps": config.steps,
@@ -145,59 +140,18 @@ def customize_workflow(template: dict, prompt_text: str, width: int = 768, heigh
         "denoise": config.denoise,
     })
 
+    # Update dimensions for all nodes that have width/height inputs
     for node in workflow.values():
         if "width" in node.get("inputs", {}):
             node["inputs"]["width"] = width
         if "height" in node.get("inputs", {}):
             node["inputs"]["height"] = height
 
-    # Find nodes connected to KSampler's positive and negative inputs
-    positive_input_link = ksampler_node["inputs"].get("positive")
-    negative_input_link = ksampler_node["inputs"].get("negative")
-
-    # --- Revised Prompt Node Identification ---
-    positive_prompt_node_id = None
-    negative_prompt_node_id = None
-
-    if positive_input_link and isinstance(positive_input_link, list) and len(positive_input_link) > 0:
-        source_node_id = positive_input_link[0]
-        if workflow.get(source_node_id, {}).get("class_type") == "CLIPTextEncode":
-            positive_prompt_node_id = source_node_id
-            logging.info(f"Identified positive prompt node by KSampler connection: {positive_prompt_node_id}")
-
-    if negative_input_link and isinstance(negative_input_link, list) and len(negative_input_link) > 0:
-        source_node_id = negative_input_link[0]
-        if workflow.get(source_node_id, {}).get("class_type") == "CLIPTextEncode":
-            negative_prompt_node_id = source_node_id
-            logging.info(f"Identified negative prompt node by KSampler connection: {negative_prompt_node_id}")
-
-    # Fallback using titles if direct connection check fails (less reliable)
-    if not positive_prompt_node_id or not negative_prompt_node_id:
-        logging.warning("Could not identify prompt nodes via KSampler connections, falling back to title check.")
-        temp_pos_id, temp_neg_id = None, None
-        for node_id, node in workflow.items():
-             if node.get("class_type") == "CLIPTextEncode":
-                 title = str(node.get("_meta", {}).get("title", "")).lower()
-                 if "negative" in title:
-                     temp_neg_id = node_id
-                 elif "positive" in title or not temp_pos_id:  # Simple fallback
-                     temp_pos_id = node_id
-        if not positive_prompt_node_id: positive_prompt_node_id = temp_pos_id
-        if not negative_prompt_node_id: negative_prompt_node_id = temp_neg_id
-        logging.info(f"Fallback identification: Positive={positive_prompt_node_id}, Negative={negative_prompt_node_id}")
-
-    # Apply the prompt text
-    if positive_prompt_node_id:
-        workflow[positive_prompt_node_id]["inputs"]["text"] = prompt_text
-        logging.info(f"Set positive prompt text in node {positive_prompt_node_id}")
-    else:
-        raise ValueError("Could not find positive CLIPTextEncode node connected to KSampler.")
-
-    # Keep the negative prompt from the template
-    if negative_prompt_node_id:
-        logging.info(f"Kept negative prompt from template in node {negative_prompt_node_id}: {workflow[negative_prompt_node_id]['inputs']['text']}")
-    else:
-        logging.warning("Could not find negative CLIPTextEncode node connected to KSampler. Negative prompt might be missing.")
+    # Find and update the first CLIPTextEncode node with the prompt
+    for node in workflow.values():
+        if node.get("class_type") == "CLIPTextEncode":
+            node["inputs"]["text"] = prompt_text
+            break
 
     logging.info(f"Workflow configuration summary for {workflow_name}:")
     logging.info(f"- Seed: {seed}")
@@ -250,9 +204,7 @@ async def generate(request: GenerateRequest):
                 request.prompt,
                 request.width,
                 request.height,
-                request.workflow,
-                use_fixed_seed=use_fixed, # Pass the flag
-                fixed_seed_value=fixed_seed # Pass the value
+                request.workflow
             )
 
             logging.info(f"Customized workflow with prompt. Sending to ComfyUI...")
