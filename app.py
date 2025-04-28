@@ -1,27 +1,26 @@
-from functools import lru_cache
-import random
-import os
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
 from pathlib import Path
-from io import BytesIO
-import time
-import logging
-import json
-import uuid
 import websocket
 import requests
-from fastapi import FastAPI, HTTPException
+import json
+import uuid
+import time
+import os
+import random
+import logging
+from io import BytesIO
+from functools import lru_cache
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
 
+# Constants for service configuration
 COMFYUI_SERVER = os.getenv('COMFYUI_SERVER', 'http://127.0.0.1:8188')
 WS_SERVER = os.getenv('WS_SERVER', 'ws://127.0.0.1:8188')
-WORKFLOWS_DIR = "workflows"
-DEFAULT_WORKFLOW = "lora"
+WORKFLOWS_DIR = os.getenv('WORKFLOWS_DIR', 'workflows')
+DEFAULT_WORKFLOW = os.getenv('DEFAULT_WORKFLOW', 'lora')
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# Configure HTTP session for reuse
 http_session = requests.Session()
-http_session.mount('http://', requests.adapters.HTTPAdapter(pool_maxsize=100, max_retries=3))
 
 class GenerateRequest(BaseModel):
     prompt: str
@@ -34,6 +33,7 @@ class HealthResponse(BaseModel):
     comfyui_connected: bool
 
 class ComfyUIClient:
+    """Handles WebSocket communication with ComfyUI server"""
     def __init__(self):
         self.client_id = str(uuid.uuid4())
         self.ws = None
@@ -56,9 +56,8 @@ class ComfyUIClient:
     def wait_for_completion(self, prompt_id):
         while True:
             message = json.loads(self.ws.recv())
-            if message["type"] == "executing":
-                if message["data"]["node"] is None and message["data"]["prompt_id"] == prompt_id:
-                    break
+            if message["type"] == "executing" and message["data"]["node"] is None and message["data"]["prompt_id"] == prompt_id:
+                break
 
     def get_image(self, prompt_id):
         history = http_session.get(f"{COMFYUI_SERVER}/history").json()
@@ -74,6 +73,7 @@ class ComfyUIClient:
 
 @lru_cache(maxsize=10)
 def load_workflow_template(workflow_name: str):
+    """Loads and caches workflow templates from JSON files"""
     try:
         with open(os.path.join(WORKFLOWS_DIR, f"{workflow_name}.json"), 'r') as f:
             return json.load(f)
@@ -81,93 +81,61 @@ def load_workflow_template(workflow_name: str):
         raise ValueError(f"Error loading workflow '{workflow_name}': {str(e)}")
 
 class ModelConfig:
-    def __init__(self, steps, cfg, sampler, scheduler, denoise=1.0):
+    """Defines sampling parameters for different model types"""
+    def __init__(self, steps, cfg, sampler, scheduler):
         self.steps = steps
         self.cfg = cfg
         self.sampler = sampler
         self.scheduler = scheduler
-        self.denoise = denoise
 
+# Predefined configurations for different model types
 MODEL_CONFIGS = {
-    "lora": ModelConfig(
-        steps=80,
-        cfg=7.0,
-        sampler="dpmpp_2m",
-        scheduler="karras"
-    ),
-    "flux_dev": ModelConfig(
-        steps=20,
-        cfg=1,
-        sampler="euler_ancestral",
-        scheduler="simple"
-    ),
-    "flux_schnell": ModelConfig(
-        steps=12,
-        cfg=1,
-        sampler="euler_ancestral",
-        scheduler="simple"
-    )
+    "lora": ModelConfig(steps=60, cfg=7.0, sampler="dpmpp_2m", scheduler="karras"),
+    "flux_dev": ModelConfig(steps=20, cfg=1, sampler="euler_ancestral", scheduler="simple"),
+    "flux_schnell": ModelConfig(steps=8, cfg=1, sampler="euler", scheduler="simple")
 }
 
 def get_model_config(workflow_name: str) -> ModelConfig:
+    """Returns appropriate model configuration based on workflow name"""
     base_name = workflow_name.split('.')[0].lower()
     return MODEL_CONFIGS.get(base_name, MODEL_CONFIGS["lora"])
 
 def customize_workflow(template: dict, prompt_text: str, width: int = 768, height: int = 768, workflow_name: str = "lora"):
+    """Customizes workflow template with user parameters and random seed"""
     workflow = template.copy()
     config = get_model_config(workflow_name)
     logging.info(f"Using configuration for model: {workflow_name}")
 
-    # Find KSampler node
     ksampler_node_id = next((node_id for node_id, node in workflow.items()
-                             if node.get("class_type") == "KSampler"), None)
-
+                         if node.get("class_type") == "KSampler"), None)
     if not ksampler_node_id:
         raise ValueError("No KSampler node found")
 
-    ksampler_node = workflow[ksampler_node_id]
-
-    # Generate random seed
     seed = random.randint(0, 0xffffffffffffffff)
-    
-    # Update KSampler parameters
-    ksampler_node["inputs"].update({
+    workflow[ksampler_node_id]["inputs"].update({
         "seed": seed,
         "steps": config.steps,
         "cfg": config.cfg,
         "sampler_name": config.sampler,
         "scheduler": config.scheduler,
-        "denoise": config.denoise,
     })
 
-    # Update dimensions for all nodes that have width/height inputs
+    # Update dimensions and prompt
     for node in workflow.values():
         if "width" in node.get("inputs", {}):
             node["inputs"]["width"] = width
         if "height" in node.get("inputs", {}):
             node["inputs"]["height"] = height
-
-    # Find and update the first CLIPTextEncode node with the prompt
-    for node in workflow.values():
         if node.get("class_type") == "CLIPTextEncode":
             node["inputs"]["text"] = prompt_text
             break
 
-    logging.info(f"Workflow configuration summary for {workflow_name}:")
-    logging.info(f"- Seed: {seed}")
-    logging.info(f"- Dimensions: {width}x{height}")
-    logging.info(f"- Sampling settings: steps={config.steps}, cfg={config.cfg}, "
-                f"sampler={config.sampler}, scheduler={config.scheduler}")
-
+    logging.info(f"Workflow configured: {workflow_name} ({width}x{height}, seed={seed})")
     return workflow, seed
 
 def validate_workflow(workflow: dict, workflow_name: str) -> bool:
-    required_nodes = {
-        "KSampler": False,
-        "CLIPTextEncode": False,
-        "VAEDecode": False,
-        "CheckpointLoaderSimple": False
-    }
+    """Ensures workflow contains all required nodes"""
+    required_nodes = {"KSampler": False, "CLIPTextEncode": False, "VAEDecode": False, "CheckpointLoaderSimple": False}
     
     for node in workflow.values():
         node_type = node.get("class_type")
@@ -177,28 +145,21 @@ def validate_workflow(workflow: dict, workflow_name: str) -> bool:
     missing_nodes = [node for node, present in required_nodes.items() if not present]
     if missing_nodes:
         raise ValueError(f"Workflow {workflow_name} is missing required nodes: {', '.join(missing_nodes)}")
-    
     return True
 
 app = FastAPI(title="Image Generation API", version="1.0.0")
 
 @app.post("/generate")
 async def generate(request: GenerateRequest):
+    """Handles image generation requests"""
     start_time = time.time()
     try:
-        logging.info(f"Received generation request for workflow {request.workflow} with prompt: {request.prompt}")
+        logging.info(f"Processing generation request: workflow={request.workflow}, prompt={request.prompt}")
         client = ComfyUIClient()
         client.connect_websocket()
         try:
             workflow_template = load_workflow_template(request.workflow)
-            logging.info(f"Loaded workflow template: {request.workflow}")
-
             validate_workflow(workflow_template, request.workflow)
-
-            # Decide if you want to use a fixed seed for debugging
-            use_fixed = False # Set to True to use the fixed seed below for testing
-            fixed_seed = 806955505434698 # The seed from lora.json
-
             workflow, seed = customize_workflow(
                 workflow_template,
                 request.prompt,
@@ -207,17 +168,11 @@ async def generate(request: GenerateRequest):
                 request.workflow
             )
 
-            logging.info(f"Customized workflow with prompt. Sending to ComfyUI...")
-            # Optional: Log the final workflow being sent
-            # logging.debug(f"Workflow being sent: {json.dumps(workflow, indent=2)}")
             result = client.queue_prompt(workflow)
-
             if not result or 'prompt_id' not in result:
                 raise ValueError("Failed to get valid prompt ID from server")
 
             prompt_id = result['prompt_id']
-            logging.info(f"Prompt queued with ID: {prompt_id}")
-
             client.wait_for_completion(prompt_id)
             image_data = client.get_image(prompt_id)
 
@@ -228,7 +183,7 @@ async def generate(request: GenerateRequest):
                     'X-Processing-Time': f"{time.time() - start_time:.2f}s",
                     'X-Seed': str(seed),
                     'X-Workflow': request.workflow,
-                    'X-Model-Config': request.workflow, # Consider reflecting actual config used
+                    'X-Model-Config': request.workflow,
                     'X-Width': str(request.width),
                     'X-Height': str(request.height),
                     'Cache-Control': 'no-store'
@@ -249,6 +204,7 @@ async def generate(request: GenerateRequest):
 
 @app.get("/workflows")
 async def list_workflows():
+    """Returns available workflows and default workflow"""
     return {
         'workflows': [f.stem for f in Path(WORKFLOWS_DIR).glob("*.json")],
         'default': DEFAULT_WORKFLOW
@@ -256,6 +212,7 @@ async def list_workflows():
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
+    """Checks API and ComfyUI server health"""
     try:
         status = http_session.get(f"{COMFYUI_SERVER}/history").status_code == 200
         return HealthResponse(
@@ -267,7 +224,6 @@ async def health_check():
 
 if __name__ == '__main__':
     import uvicorn
-    
     os.makedirs(WORKFLOWS_DIR, exist_ok=True)
-    logger.info("Starting FastAPI server on port 8787")
+    logging.info("Starting FastAPI server on port 8787")
     uvicorn.run(app, host="0.0.0.0", port=8787)
