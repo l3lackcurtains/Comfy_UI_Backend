@@ -52,7 +52,7 @@ gcloud auth configure-docker
 docker login gcr.io
 
 docker build -t comfy-image-generation .
-docker tag comfy-image-generation gcr.io/citric-lead-450721-v2/comfy-image-generation:1.0.1
-docker push gcr.io/citric-lead-450721-v2/comfy-image-generation:1.0.1
+docker tag comfy-image-generation gcr.io/citric-lead-450721-v2/comfy-image-generation:1.0.2
+docker push gcr.io/citric-lead-450721-v2/comfy-image-generation:1.0.2
 
 ```
