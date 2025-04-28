@@ -1,7 +1,7 @@
 {
   "6": {
     "inputs": {
-      "text": "a bottle with a beautiful rainbow galaxy inside it on top of a wooden table in the middle of a modern kitchen beside a plate of vegetables and mushrooms and a wine glasse that contains a planet earth with a plate with a half eaten apple pie on it",
+      "text": "",
       "clip": [
         "30",
         1
@@ -63,7 +63,7 @@
   },
   "31": {
     "inputs": {
-      "seed": 163391708067219,
+      "seed": 56033473100039,
       "steps": 4,
       "cfg": 1,
       "sampler_name": "euler",

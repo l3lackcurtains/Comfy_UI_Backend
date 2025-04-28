@@ -81,48 +81,37 @@ def load_workflow_template(workflow_name: str):
         raise ValueError(f"Error loading workflow '{workflow_name}': {str(e)}")
 
 class ModelConfig:
-    def __init__(self, steps, cfg, sampler, scheduler, denoise=1.0, 
-                 lora_strength_model=0.75, lora_strength_clip=1.0,
-                 custom_params=None):
+    def __init__(self, steps, cfg, sampler, scheduler, denoise=1.0):
         self.steps = steps
         self.cfg = cfg
         self.sampler = sampler
         self.scheduler = scheduler
         self.denoise = denoise
-        self.lora_strength_model = lora_strength_model
-        self.lora_strength_clip = lora_strength_clip
-        self.custom_params = custom_params if custom_params else {}
 
 MODEL_CONFIGS = {
     "lora": ModelConfig(
         steps=60,
         cfg=7.0,
         sampler="dpmpp_2m",
-        scheduler="karras",
-        lora_strength_model=0.75,
-        lora_strength_clip=1.0
+        scheduler="karras"
     ),
     "lora_1": ModelConfig(
         steps=80,
         cfg=8.5,
         sampler="euler_ancestral",
-        scheduler="simple",
-        lora_strength_model=0.85,
-        lora_strength_clip=1.0
+        scheduler="simple"
     ),
     "flux_dev": ModelConfig(
         steps=20,
         cfg=1,
         sampler="euler_ancestral",
-        scheduler="simple",
-        custom_params={}
+        scheduler="simple"
     ),
     "flux_schnell": ModelConfig(
         steps=4,
         cfg=1,
         sampler="euler_ancestral",
-        scheduler="simple",
-        custom_params={}
+        scheduler="simple"
     )
 }
 
@@ -156,35 +145,19 @@ def customize_workflow(template: dict, prompt_text: str, width: int = 768, heigh
         "denoise": config.denoise,
     })
 
-    if lora_loader_node_id and workflow_name.startswith("lora"):
-        workflow[lora_loader_node_id]["inputs"].update({
-            "strength_model": config.lora_strength_model,
-            "strength_clip": config.lora_strength_clip,
-        })
-        logging.info(f"Configured LoRA node {lora_loader_node_id} with strengths: "
-                     f"model={config.lora_strength_model}, clip={config.lora_strength_clip}")
-
-    if config.custom_params:
-        for node in workflow.values():
-            if "inputs" in node:
-                for param_name, param_value in config.custom_params.items():
-                    if param_name in node["inputs"]:
-                        node["inputs"][param_name] = param_value
-                        logging.info(f"Set custom parameter {param_name}={param_value} for node {node.get('class_type')}")
-
     for node in workflow.values():
         if "width" in node.get("inputs", {}):
             node["inputs"]["width"] = width
         if "height" in node.get("inputs", {}):
             node["inputs"]["height"] = height
 
-    # --- Revised Prompt Node Identification ---
-    positive_prompt_node_id = None
-    negative_prompt_node_id = None
-
     # Find nodes connected to KSampler's positive and negative inputs
     positive_input_link = ksampler_node["inputs"].get("positive")
     negative_input_link = ksampler_node["inputs"].get("negative")
+
+    # --- Revised Prompt Node Identification ---
+    positive_prompt_node_id = None
+    negative_prompt_node_id = None
 
     if positive_input_link and isinstance(positive_input_link, list) and len(positive_input_link) > 0:
         source_node_id = positive_input_link[0]
@@ -207,12 +180,11 @@ def customize_workflow(template: dict, prompt_text: str, width: int = 768, heigh
                  title = str(node.get("_meta", {}).get("title", "")).lower()
                  if "negative" in title:
                      temp_neg_id = node_id
-                 elif "positive" in title or not temp_pos_id: # Simple fallback
+                 elif "positive" in title or not temp_pos_id:  # Simple fallback
                      temp_pos_id = node_id
         if not positive_prompt_node_id: positive_prompt_node_id = temp_pos_id
         if not negative_prompt_node_id: negative_prompt_node_id = temp_neg_id
         logging.info(f"Fallback identification: Positive={positive_prompt_node_id}, Negative={negative_prompt_node_id}")
-
 
     # Apply the prompt text
     if positive_prompt_node_id:
@@ -226,16 +198,12 @@ def customize_workflow(template: dict, prompt_text: str, width: int = 768, heigh
         logging.info(f"Kept negative prompt from template in node {negative_prompt_node_id}: {workflow[negative_prompt_node_id]['inputs']['text']}")
     else:
         logging.warning("Could not find negative CLIPTextEncode node connected to KSampler. Negative prompt might be missing.")
-    # --- End Revised Prompt Node Identification ---
-
 
     logging.info(f"Workflow configuration summary for {workflow_name}:")
     logging.info(f"- Seed: {seed}")
     logging.info(f"- Dimensions: {width}x{height}")
     logging.info(f"- Sampling settings: steps={config.steps}, cfg={config.cfg}, "
                 f"sampler={config.sampler}, scheduler={config.scheduler}")
-    if config.custom_params:
-        logging.info(f"- Custom parameters: {config.custom_params}")
 
     return workflow, seed
 
