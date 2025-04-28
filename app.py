@@ -95,11 +95,11 @@ class ModelConfig:
 
 MODEL_CONFIGS = {
     "lora": ModelConfig(
-        steps=80,
-        cfg=8.5,
-        sampler="euler_ancestral",
-        scheduler="simple",
-        lora_strength_model=0.85,
+        steps=60,
+        cfg=7.0,
+        sampler="dpmpp_2m",
+        scheduler="karras",
+        lora_strength_model=0.75,
         lora_strength_clip=1.0
     ),
     "lora_1": ModelConfig(
@@ -130,21 +130,24 @@ def get_model_config(workflow_name: str) -> ModelConfig:
     base_name = workflow_name.split('.')[0].lower()
     return MODEL_CONFIGS.get(base_name, MODEL_CONFIGS["lora"])
 
-def customize_workflow(template: dict, prompt_text: str, width: int = 768, height: int = 768, workflow_name: str = "lora"):
+def customize_workflow(template: dict, prompt_text: str, width: int = 768, height: int = 768, workflow_name: str = "lora", use_fixed_seed: bool = False, fixed_seed_value: int = 806955505434698):
     workflow = template.copy()
     config = get_model_config(workflow_name)
     logging.info(f"Using configuration for model: {workflow_name}")
-    
-    ksampler_node = next((node_id for node_id, node in workflow.items() 
-                         if node.get("class_type") == "KSampler"), None)
-    lora_loader_node = next((node_id for node_id, node in workflow.items() 
-                           if node.get("class_type") in ["LoraLoader", "DiffControlNetLoader"]), None)
-    
-    if not ksampler_node:
+
+    ksampler_node_id = next((node_id for node_id, node in workflow.items()
+                             if node.get("class_type") == "KSampler"), None)
+    lora_loader_node_id = next((node_id for node_id, node in workflow.items()
+                                if node.get("class_type") in ["LoraLoader", "DiffControlNetLoader"]), None)
+
+    if not ksampler_node_id:
         raise ValueError("No KSampler node found")
 
-    seed = random.randint(0, 0xffffffffffffffff)
-    workflow[ksampler_node]["inputs"].update({
+    ksampler_node = workflow[ksampler_node_id]
+
+    # Use fixed seed if requested, otherwise random
+    seed = fixed_seed_value if use_fixed_seed else random.randint(0, 0xffffffffffffffff)
+    ksampler_node["inputs"].update({
         "seed": seed,
         "steps": config.steps,
         "cfg": config.cfg,
@@ -152,15 +155,15 @@ def customize_workflow(template: dict, prompt_text: str, width: int = 768, heigh
         "scheduler": config.scheduler,
         "denoise": config.denoise,
     })
-    
-    if lora_loader_node and workflow_name.startswith("lora"):
-        workflow[lora_loader_node]["inputs"].update({
+
+    if lora_loader_node_id and workflow_name.startswith("lora"):
+        workflow[lora_loader_node_id]["inputs"].update({
             "strength_model": config.lora_strength_model,
             "strength_clip": config.lora_strength_clip,
         })
-        logging.info(f"Configured LoRA node {lora_loader_node} with strengths: "
-                    f"model={config.lora_strength_model}, clip={config.lora_strength_clip}")
-    
+        logging.info(f"Configured LoRA node {lora_loader_node_id} with strengths: "
+                     f"model={config.lora_strength_model}, clip={config.lora_strength_clip}")
+
     if config.custom_params:
         for node in workflow.values():
             if "inputs" in node:
@@ -168,32 +171,64 @@ def customize_workflow(template: dict, prompt_text: str, width: int = 768, heigh
                     if param_name in node["inputs"]:
                         node["inputs"][param_name] = param_value
                         logging.info(f"Set custom parameter {param_name}={param_value} for node {node.get('class_type')}")
-    
+
     for node in workflow.values():
         if "width" in node.get("inputs", {}):
             node["inputs"]["width"] = width
         if "height" in node.get("inputs", {}):
             node["inputs"]["height"] = height
-    
-    prompt_set = False
-    for node_id, node in workflow.items():
-        if node.get("class_type") == "CLIPTextEncode":
-            if ("positive" in str(node.get("_meta", {}).get("title", "")).lower() or 
-                not "negative" in str(node.get("_meta", {}).get("title", "")).lower()):
-                workflow[node_id]["inputs"]["text"] = prompt_text
-                prompt_set = True
-                logging.info(f"Set positive prompt in node {node_id}")
-                
-                negative_node = next((n_id for n_id, n in workflow.items() 
-                                   if n.get("class_type") == "CLIPTextEncode" and 
-                                   "negative" in str(n.get("_meta", {}).get("title", "")).lower()), None)
-                if negative_node:
-                    workflow[negative_node]["inputs"]["text"] = ""
-                    logging.info(f"Set empty negative prompt in node {negative_node}")
-    
-    if not prompt_set:
-        raise ValueError("No suitable CLIP text encode node found in workflow")
-    
+
+    # --- Revised Prompt Node Identification ---
+    positive_prompt_node_id = None
+    negative_prompt_node_id = None
+
+    # Find nodes connected to KSampler's positive and negative inputs
+    positive_input_link = ksampler_node["inputs"].get("positive")
+    negative_input_link = ksampler_node["inputs"].get("negative")
+
+    if positive_input_link and isinstance(positive_input_link, list) and len(positive_input_link) > 0:
+        source_node_id = positive_input_link[0]
+        if workflow.get(source_node_id, {}).get("class_type") == "CLIPTextEncode":
+            positive_prompt_node_id = source_node_id
+            logging.info(f"Identified positive prompt node by KSampler connection: {positive_prompt_node_id}")
+
+    if negative_input_link and isinstance(negative_input_link, list) and len(negative_input_link) > 0:
+        source_node_id = negative_input_link[0]
+        if workflow.get(source_node_id, {}).get("class_type") == "CLIPTextEncode":
+            negative_prompt_node_id = source_node_id
+            logging.info(f"Identified negative prompt node by KSampler connection: {negative_prompt_node_id}")
+
+    # Fallback using titles if direct connection check fails (less reliable)
+    if not positive_prompt_node_id or not negative_prompt_node_id:
+        logging.warning("Could not identify prompt nodes via KSampler connections, falling back to title check.")
+        temp_pos_id, temp_neg_id = None, None
+        for node_id, node in workflow.items():
+             if node.get("class_type") == "CLIPTextEncode":
+                 title = str(node.get("_meta", {}).get("title", "")).lower()
+                 if "negative" in title:
+                     temp_neg_id = node_id
+                 elif "positive" in title or not temp_pos_id: # Simple fallback
+                     temp_pos_id = node_id
+        if not positive_prompt_node_id: positive_prompt_node_id = temp_pos_id
+        if not negative_prompt_node_id: negative_prompt_node_id = temp_neg_id
+        logging.info(f"Fallback identification: Positive={positive_prompt_node_id}, Negative={negative_prompt_node_id}")
+
+
+    # Apply the prompt text
+    if positive_prompt_node_id:
+        workflow[positive_prompt_node_id]["inputs"]["text"] = prompt_text
+        logging.info(f"Set positive prompt text in node {positive_prompt_node_id}")
+    else:
+        raise ValueError("Could not find positive CLIPTextEncode node connected to KSampler.")
+
+    # Keep the negative prompt from the template
+    if negative_prompt_node_id:
+        logging.info(f"Kept negative prompt from template in node {negative_prompt_node_id}: {workflow[negative_prompt_node_id]['inputs']['text']}")
+    else:
+        logging.warning("Could not find negative CLIPTextEncode node connected to KSampler. Negative prompt might be missing.")
+    # --- End Revised Prompt Node Identification ---
+
+
     logging.info(f"Workflow configuration summary for {workflow_name}:")
     logging.info(f"- Seed: {seed}")
     logging.info(f"- Dimensions: {width}x{height}")
@@ -201,7 +236,7 @@ def customize_workflow(template: dict, prompt_text: str, width: int = 768, heigh
                 f"sampler={config.sampler}, scheduler={config.scheduler}")
     if config.custom_params:
         logging.info(f"- Custom parameters: {config.custom_params}")
-    
+
     return workflow, seed
 
 def validate_workflow(workflow: dict, workflow_name: str) -> bool:
@@ -235,29 +270,37 @@ async def generate(request: GenerateRequest):
         try:
             workflow_template = load_workflow_template(request.workflow)
             logging.info(f"Loaded workflow template: {request.workflow}")
-            
+
             validate_workflow(workflow_template, request.workflow)
-            
+
+            # Decide if you want to use a fixed seed for debugging
+            use_fixed = False # Set to True to use the fixed seed below for testing
+            fixed_seed = 806955505434698 # The seed from lora.json
+
             workflow, seed = customize_workflow(
-                workflow_template, 
+                workflow_template,
                 request.prompt,
                 request.width,
                 request.height,
-                request.workflow
+                request.workflow,
+                use_fixed_seed=use_fixed, # Pass the flag
+                fixed_seed_value=fixed_seed # Pass the value
             )
-            
+
             logging.info(f"Customized workflow with prompt. Sending to ComfyUI...")
+            # Optional: Log the final workflow being sent
+            # logging.debug(f"Workflow being sent: {json.dumps(workflow, indent=2)}")
             result = client.queue_prompt(workflow)
-            
+
             if not result or 'prompt_id' not in result:
                 raise ValueError("Failed to get valid prompt ID from server")
-                
+
             prompt_id = result['prompt_id']
             logging.info(f"Prompt queued with ID: {prompt_id}")
-            
+
             client.wait_for_completion(prompt_id)
             image_data = client.get_image(prompt_id)
-            
+
             return StreamingResponse(
                 BytesIO(image_data['content']),
                 media_type='image/png',
@@ -265,7 +308,7 @@ async def generate(request: GenerateRequest):
                     'X-Processing-Time': f"{time.time() - start_time:.2f}s",
                     'X-Seed': str(seed),
                     'X-Workflow': request.workflow,
-                    'X-Model-Config': request.workflow,
+                    'X-Model-Config': request.workflow, # Consider reflecting actual config used
                     'X-Width': str(request.width),
                     'X-Height': str(request.height),
                     'Cache-Control': 'no-store'

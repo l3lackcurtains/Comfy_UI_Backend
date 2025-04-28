@@ -1,7 +1,7 @@
 {
   "3": {
     "inputs": {
-      "seed": 806955505434698,
+      "seed": 560408249677984,
       "steps": 30,
       "cfg": 7,
       "sampler_name": "dpmpp_2m",
@@ -51,7 +51,7 @@
   },
   "6": {
     "inputs": {
-      "text": "upperbody shot, 1girl,solo,chibi,long hairs, happy, laugh, hugging a teddy bear, looking at viewers, dancing stand, cute, soft color, flowers in background, many flowers, among flowers, best quality, highres, delicate details,",
+      "text": "",
       "clip": [
         "11",
         1
@@ -64,7 +64,7 @@
   },
   "7": {
     "inputs": {
-      "text": "(worst quality, low quality:1.4), (bad anatomy), text, error, missing fingers, extra digit, fewer digits, cropped, jpeg artifacts, signature, watermark, username, blurry, deformed face",
+      "text": "",
       "clip": [
         "11",
         1
@@ -107,8 +107,8 @@
   "11": {
     "inputs": {
       "lora_name": "blindbox_v1_mix.safetensors",
-      "strength_model": 0.75,
-      "strength_clip": 1,
+      "strength_model": 0.7500000000000001,
+      "strength_clip": 1.0000000000000002,
       "model": [
         "4",
         0
