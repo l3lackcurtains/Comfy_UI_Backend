@@ -108,6 +108,12 @@ MODEL_CONFIGS = {
         "sampler": "dpmpp_2m",
         "scheduler": "karras"
     },
+    "lora_1": {
+        "steps": 60,
+        "cfg": 7.0,
+        "sampler": "dpmpp_2m",
+        "scheduler": "karras"
+    },
     "flux_dev": {
         "steps": 20,          
         "sampler": "euler_ancestral",  
