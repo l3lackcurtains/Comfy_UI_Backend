@@ -1,4 +1,3 @@
-
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from pathlib import Path
@@ -205,7 +204,6 @@ async def generate(request: GenerateRequest):
                 request.height,
                 request.workflow
             )
-
             result = client.queue_prompt(workflow)
             if not result or 'prompt_id' not in result:
                 logging.error(f"Invalid response from server: {result}")
