@@ -102,7 +102,7 @@ def load_workflow_template(workflow_name: str):
 # Predefined configurations for different model types
 MODEL_CONFIGS = {
     "lora": {
-        "steps": 60,
+        "steps": 30,
         "cfg": 7.0,
         "sampler": "dpmpp_2m",
         "scheduler": "karras"
