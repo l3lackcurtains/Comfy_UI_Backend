@@ -3,7 +3,7 @@ kind: Deployment
 metadata:
   name: comfy-image-generation-deployment
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: comfy-image-generation
@@ -12,6 +12,9 @@ spec:
       labels:
         app: comfy-image-generation
     spec:
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-l4
+      restartPolicy: Always
       containers:
         - name: comfy-image-generation
           image: gcr.io/citric-lead-450721-v2/comfy-image-generation:1.0.6
