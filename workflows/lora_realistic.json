@@ -1,9 +1,9 @@
 {
   "3": {
     "inputs": {
-      "seed": 57463845780022,
+      "seed": 528683235854615,
       "steps": 30,
-      "cfg": 7,
+      "cfg": 23,
       "sampler_name": "dpmpp_2m",
       "scheduler": "karras",
       "denoise": 1,
@@ -51,7 +51,7 @@
   },
   "6": {
     "inputs": {
-      "text": "anime girls homies\n",
+      "text": "hyperrealistic, anime art style, realistic pose, lively expression on face, expressive eyes, flawless clear skin, delicate details, hyperrealistic hair, hyperrealistic face, smooth skin, sharp image, sexy woman, bedroom background",
       "clip": [
         "11",
         1
@@ -64,7 +64,7 @@
   },
   "7": {
     "inputs": {
-      "text": "(worst quality, low quality:1.4), (bad anatomy), text, error, missing fingers, extra digit, fewer digits, cropped, jpeg artifacts, signature, watermark, username, blurry, deformed face",
+      "text": "(worst quality, low quality:1.4), (bad anatomy), text, error, missing fingers, extra digit, fewer digits, cropped, jpeg artifacts, signature, watermark, username, blurry, deformed face, flaws on skin, bumps on skin, moles, warts, spots on skin, doll looking, toy looking, red eyes, fine skin lines, fake expressions, fake hair",
       "clip": [
         "11",
         1
@@ -106,9 +106,9 @@
   },
   "11": {
     "inputs": {
-      "lora_name": "dit_lora.safetensors",
-      "strength_model": 0.7500000000000001,
-      "strength_clip": 1.0000000000000002,
+      "lora_name": "blindbox_v1_mix.safetensors",
+      "strength_model": 0.75,
+      "strength_clip": 1,
       "model": [
         "4",
         0
