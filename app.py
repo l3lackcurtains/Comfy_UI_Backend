@@ -33,6 +33,7 @@ class GenerateRequest(BaseModel):
     workflow: str = DEFAULT_WORKFLOW
     width: int = Field(default=768, ge=64, le=2048)
     height: int = Field(default=768, ge=64, le=2048)
+    steps: int = Field(default=None, ge=1, le=1000, description="Number of sampling steps")
 
 class HealthResponse(BaseModel):
     status: str
@@ -130,7 +131,7 @@ def get_model_config(workflow_name: str) -> dict:
     base_name = workflow_name.split('.')[0].lower()
     return MODEL_CONFIGS.get(base_name, MODEL_CONFIGS["lora"]).copy()
 
-def customize_workflow(template: dict, prompt_text: str, width: int = 768, height: int = 768, workflow_name: str = "lora"):
+def customize_workflow(template: dict, prompt_text: str, width: int = 768, height: int = 768, workflow_name: str = "lora", steps: int = None):
     """Customizes workflow template with user parameters and random seed"""
     workflow = template.copy()
     config = get_model_config(workflow_name)
@@ -145,7 +146,7 @@ def customize_workflow(template: dict, prompt_text: str, width: int = 768, heigh
     seed = random.randint(0, 0xffffffffffffffff)
     sampler_inputs = {
         "seed": seed,
-        "steps": config["steps"],
+        "steps": steps if steps is not None else config["steps"],
         "sampler_name": config["sampler"],
         "scheduler": config["scheduler"],
     }
@@ -190,7 +191,7 @@ app = FastAPI(title="Image Generation API", version="1.0.0")
 async def generate(request: GenerateRequest):
     """Handles image generation requests"""
     start_time = time.time()
-    logging.info(f"New generation request - Workflow: {request.workflow}, Size: {request.width}x{request.height}")
+    logging.info(f"New generation request - Workflow: {request.workflow}, Size: {request.width}x{request.height}, Steps: {request.steps or 'default'}")
     
     try:
         client = ComfyUIClient()
@@ -202,7 +203,8 @@ async def generate(request: GenerateRequest):
                 request.prompt,
                 request.width,
                 request.height,
-                request.workflow
+                request.workflow,
+                request.steps
             )
             result = client.queue_prompt(workflow)
             if not result or 'prompt_id' not in result:
@@ -226,6 +228,7 @@ async def generate(request: GenerateRequest):
                     'X-Model-Config': request.workflow,
                     'X-Width': str(request.width),
                     'X-Height': str(request.height),
+                    'X-Steps': str(request.steps) if request.steps is not None else str(get_model_config(request.workflow)["steps"]),
                     'Cache-Control': 'no-store'
                 }
             )
