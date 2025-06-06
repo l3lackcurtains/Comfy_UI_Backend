@@ -17,7 +17,7 @@ spec:
       restartPolicy: Always
       containers:
         - name: comfy-image-generation
-          image: gcr.io/citric-lead-450721-v2/comfy-image-generation:1.0.6
+          image: gcr.io/citric-lead-450721-v2/comfy-image-generation:1.0.7
           ports:
             - containerPort: 8188  # ComfyUI's default port
             - containerPort: 8787  # Your API port
