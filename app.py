@@ -206,6 +206,9 @@ async def generate(request: GenerateRequest):
                 request.workflow,
                 request.steps
             )
+
+            print(workflow, seed)
+
             result = client.queue_prompt(workflow)
             if not result or 'prompt_id' not in result:
                 logging.error(f"Invalid response from server: {result}")
